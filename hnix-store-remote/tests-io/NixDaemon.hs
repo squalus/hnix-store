@@ -14,6 +14,7 @@ import qualified System.Environment
 import           Control.Exception              ( bracket )
 import           Control.Concurrent             ( threadDelay )
 import qualified Data.ByteString.Char8         as BSC
+import qualified Data.ByteString               as BS
 import qualified Data.Either
 import qualified Data.HashSet                  as HS
 import qualified Data.Map.Strict               as M
@@ -31,14 +32,24 @@ import           Test.Hspec.Expectations.Lifted
 
 import           System.FilePath
 
+import           System.Nix.Base (BaseEncoding(..))
 import           System.Nix.Build
+import           System.Nix.Hash (HashAlgo(..), encodeDigestWith)
 import           System.Nix.StorePath
 import           System.Nix.StorePath.Metadata
 import           System.Nix.Store.Remote
 import           System.Nix.Store.Remote.Protocol
+import           System.Nix.Nar                 ( dumpPath, dumpString )
 
-import           Crypto.Hash                    ( SHA256 )
-import           System.Nix.Nar                 ( dumpPath )
+import           Crypto.Hash                    ( Digest, SHA256, hashInit, hashUpdate, hashFinalize )
+import           Control.Monad.IO.Class
+import           Data.Dependent.Sum (DSum((:=>)))
+import           Data.STRef
+import           Control.Monad.ST
+import           Data.Time.Clock (UTCTime(..))
+import           Data.Time.Calendar.OrdinalDate (fromOrdinalDate)
+import qualified Data.HashSet as HashSet
+import           Data.Default.Class
 
 createProcessEnv :: FilePath -> String -> [String] -> IO P.ProcessHandle
 createProcessEnv fp proc args = do
@@ -272,3 +283,52 @@ spec_protocol = Hspec.around withNixDaemon $
         path <- dummy
         liftIO $ print path
         isValidPathUncached path `shouldReturn` True
+
+    context "addToStoreNar" $ do
+      itRights "adds nar file" $ do
+        let helloBytes = "hello"
+        narBytes <- liftIO $ bytesToNar helloBytes
+        let narHash = sha256 narBytes
+            meta = Metadata
+              { deriverPath = Just sampleDeriver0
+              , narHash = narHash
+              , references = HashSet.empty
+              , registrationTime = UTCTime (fromOrdinalDate 0 0) 0
+              , narBytes = Just ((fromIntegral . BS.length) narBytes)
+              , trust = BuiltElsewhere
+              , sigs = mempty
+              , contentAddress = Nothing
+              }
+
+        let narSource = dumpString helloBytes
+        addToStoreNar False False sampleStorePath0 meta narSource
+
+sampleFile0 :: BS.ByteString
+sampleFile0 = "hello"
+
+sampleStorePath0 :: StorePath
+sampleStorePath0 = case parsePath def "/nix/store/00000lj3clbkc0aqvjjzfa6slp4zdvlj-hello-2.12.1" of
+  Left _ -> error "parsePath"
+  Right x -> x
+
+sampleDeriver0 :: StorePath
+sampleDeriver0 = case parsePath def "/nix/store/g2mxdrkwr1hck4y5479dww7m56d1x81v-hello-2.12.1.drv" of
+  Left _ -> error "parsePath"
+  Right x -> x
+
+-- XXX any way to remove IO? there's no actual IO
+bytesToNar :: BS.ByteString -> IO BS.ByteString
+bytesToNar bytes = do
+  -- XXX can this be done without ST?
+  ref <- stToIO $ newSTRef BS.empty
+  let accumFn chunk = do
+       stToIO $ modifySTRef ref (<> chunk)
+  dumpString bytes accumFn
+  stToIO $ readSTRef ref
+
+sha256 :: BS.ByteString -> DSum HashAlgo Digest
+sha256 bs = HashAlgo_SHA256 :=> hashFinalize (hashUpdate (hashInit @SHA256) bs)
+
+hashBase16 :: DSum HashAlgo Digest -> Text
+hashBase16 (_ :=> digest) = System.Nix.Hash.encodeDigestWith Base16 digest
+

@@ -152,6 +152,7 @@ test-suite remote-io
     , bytestring
     , containers
     , crypton
+    , dependent-sum
     , directory
     , process
     , filepath
@@ -164,3 +165,5 @@ test-suite remote-io
     , temporary
     , unix
     , unordered-containers
+    , time
+    , data-default-class

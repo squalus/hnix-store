@@ -4,6 +4,7 @@
 
 module System.Nix.Store.Remote
   ( addToStore
+  , addToStoreNar
   , addTextToStore
   , addSignatures
   , addIndirectRoot
@@ -33,13 +34,13 @@ module System.Nix.Store.Remote
 
 import Data.Dependent.Sum (DSum((:=>)))
 import Data.HashSet (HashSet)
+import Data.Maybe (fromMaybe)
 import Data.Map (Map)
 import Data.Text (Text)
 import qualified Data.Text
 import qualified Control.Monad
 import qualified Data.Attoparsec.Text
 import qualified Data.Text.Encoding
-import qualified System.Nix.Hash
 --
 import qualified Data.ByteString.Lazy          as BSL
 
@@ -48,10 +49,14 @@ import System.Nix.Store.Types (FileIngestionMethod(..), RepairMode(..))
 import           System.Nix.Build               ( BuildMode
                                                 , BuildResult
                                                 )
+import           System.Nix.ContentAddress      ( buildContentAddress )
 import           System.Nix.Hash                ( NamedAlgo(..)
                                                 , BaseEncoding(Base16)
                                                 , decodeDigestWith
+                                                , encodeDigestWith
+                                                , HashAlgo(..)
                                                 )
+import           System.Nix.Signature           ( signatureToText )
 import           System.Nix.StorePath           ( StorePath
                                                 , StorePathName
                                                 , StorePathHashPart
@@ -101,6 +106,35 @@ addToStore name source recursive repair = do
       putText $ System.Nix.Hash.algoName @a
     source yield
   sockGetPath
+
+-- | Add a NAR with metadata to the store.
+addToStoreNar
+  :: Bool -- ^ repair
+  -> Bool -- ^ check signatures
+  -> StorePath
+  -> Metadata StorePath
+  -> NarSource MonadStore -- ^ provide nar stream
+  -> MonadStore ()
+addToStoreNar repair checkSigs storePath meta source = do
+  storeDir <- getStoreDir
+  runOpArgsIO AddToStoreNar $ \yield -> do
+    yield $ BSL.toStrict $ Data.Binary.Put.runPut $ do
+      putPath storeDir storePath
+      case deriverPath meta of
+        Nothing -> putText ""
+        Just path -> putPath storeDir path
+      putText $ (\(_ :=> d) -> encodeDigestWith Base16 d) (narHash meta)
+      putPaths storeDir $ references meta
+      putInt (0::Int) -- XXX registration time
+      putInt $ fromMaybe 0 (narBytes meta)
+      putBool $ case trust meta of
+        BuiltLocally -> True
+        BuiltElsewhere -> False
+      putTexts $ signatureToText <$> Data.Set.toList (sigs meta)
+      putText $ maybe "" buildContentAddress (contentAddress meta)
+      putBool repair
+      putBool $ not checkSigs
+    source yield
 
 -- | Add text to store.
 --
